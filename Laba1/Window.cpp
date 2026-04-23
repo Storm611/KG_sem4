@@ -35,7 +35,7 @@ Window::Window(const std::wstring& title, int width, int height)
 
     // Load model
     try {
-        LoadModel("Sofa_OBJ2.obj");
+        LoadModel("sponza.obj");
         std::cout << "Model loaded successfully!\n";
         std::cout << "Vertices: " << vertices.size() << "\n";
         std::cout << "Indices: " << indices.size() << "\n";
@@ -58,6 +58,10 @@ Window::Window(const std::wstring& title, int width, int height)
 
     for (auto& mat : materials) {
         mat.textureName = "dark+wood.png";
+        if (mat.name.find("lion") != std::string::npos ||
+            mat.name.find("lion2_ddn") != std::string::npos) {
+            mat.transparent = true;
+        }
     }
 
     // Потом загружаем
@@ -382,7 +386,12 @@ void Window::CreateShaders() {
             // finalColor += float3(0.0, 0.1, 0.0) * abs(input.normal.y); // Зеленый по Y
             // finalColor += float3(0.0, 0.0, 0.1) * abs(input.normal.z); // Синий по Z
             
-            return float4(finalColor, texColor.a);
+            float alpha = texColor.a;
+
+// просто чтобы сразу было видно — делаем полупрозрачным
+alpha *= 0.5;
+
+return float4(finalColor, alpha);
         }
     )";
 
@@ -519,10 +528,21 @@ void Window::CreatePSO() {
     psoDesc.RasterizerState.DepthClipEnable = TRUE;
     psoDesc.RasterizerState.MultisampleEnable = FALSE;
     psoDesc.RasterizerState.AntialiasedLineEnable = FALSE;
-    psoDesc.BlendState.RenderTarget[0].BlendEnable = FALSE;
-    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    auto& rt = psoDesc.BlendState.RenderTarget[0];
+    rt.BlendEnable = TRUE;
+    rt.LogicOpEnable = FALSE;
+
+    rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    rt.BlendOp = D3D12_BLEND_OP_ADD;
+
+    rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+    rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+    rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+
+    rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     psoDesc.DepthStencilState.DepthEnable = TRUE;
-    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
     psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     psoDesc.SampleMask = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -533,6 +553,27 @@ void Window::CreatePSO() {
 
     hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipelineState));
     if (FAILED(hr)) throw std::runtime_error("Failed to create pipeline state.");
+
+
+    psoDesc.BlendState.RenderTarget[0].BlendEnable = FALSE;
+    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+
+    d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipelineStateOpaque));
+    auto transparentPSO = psoDesc;
+
+    // включаем blending
+    rt.BlendEnable = TRUE;
+    rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    rt.BlendOp = D3D12_BLEND_OP_ADD;
+    rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+    rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+    rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+
+    // отключаем запись в depth
+    transparentPSO.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+
+    d3dDevice->CreateGraphicsPipelineState(&transparentPSO, IID_PPV_ARGS(&pipelineStateTransparent));
 }
 
 HRESULT Window::LoadTexture(const std::wstring& fileName, ID3D12Resource** textureResource, int& descriptorIndex) {
@@ -885,7 +926,7 @@ void Window::UpdateMatrices() {
 
     //Тайлинг и анимации
     cb.tiling = XMFLOAT2(1.0f, 1.0f);
-    cb.animSpeed = XMFLOAT2(1.0f, 1.0f);
+    cb.animSpeed = XMFLOAT2(0.0f, 0.0f);
 
     // Устанавливаем яркий цвет (белый)
     cb.diffuseColor = XMFLOAT3(1.0f, 1.0f, 1.0f);
@@ -992,6 +1033,41 @@ void Window::RenderFrame() {
     // Wait for frame completion
     WaitForPreviousFrame();
     MoveToNextFrame();
+
+
+    commandList->SetPipelineState(pipelineStateOpaque);
+
+    for (const auto& sub : submeshes) {
+        const Material& mat = materials[sub.materialIndex];
+
+        if (mat.transparent) continue; // ❌ пропускаем прозрачные
+
+        // биндим текстуру
+        if (mat.texture && mat.textureDescriptorIndex >= 0) {
+            D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
+            srvHandle.ptr += mat.textureDescriptorIndex * srvDescriptorSize;
+            commandList->SetGraphicsRootDescriptorTable(1, srvHandle);
+        }
+
+        commandList->DrawIndexedInstanced(sub.indexCount, 1, sub.startIndex, 0, 0);
+    }
+
+
+    commandList->SetPipelineState(pipelineStateTransparent);
+
+    for (const auto& sub : submeshes) {
+        const Material& mat = materials[sub.materialIndex];
+
+        if (!mat.transparent) continue; // ❌ только прозрачные
+
+        if (mat.texture && mat.textureDescriptorIndex >= 0) {
+            D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
+            srvHandle.ptr += mat.textureDescriptorIndex * srvDescriptorSize;
+            commandList->SetGraphicsRootDescriptorTable(1, srvHandle);
+        }
+
+        commandList->DrawIndexedInstanced(sub.indexCount, 1, sub.startIndex, 0, 0);
+    }
 }
 
 void Window::WaitForPreviousFrame() {

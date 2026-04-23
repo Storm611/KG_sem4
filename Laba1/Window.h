@@ -58,7 +58,8 @@ private:
     ID3D12Resource* depthStencilBuffer = nullptr;
     ID3D12RootSignature* rootSignature = nullptr;
     ID3D12PipelineState* pipelineState = nullptr;
-
+    ID3D12PipelineState* pipelineStateOpaque = nullptr;
+    ID3D12PipelineState* pipelineStateTransparent = nullptr;
     ID3D12Resource* vertexBuffer = nullptr;
     ID3D12Resource* indexBuffer = nullptr;
     ID3D12Resource* constantBuffer = nullptr;
@@ -123,6 +124,8 @@ private:
         ID3D12Resource* texture = nullptr;
         int textureDescriptorIndex = -1;
         float specularIntensity = 1.0f;
+
+        bool transparent = false;
     };
 
     struct Submesh {
